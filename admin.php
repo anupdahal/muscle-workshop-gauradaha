@@ -51,6 +51,10 @@ exit;
 }
 
 // 2. DATA TRANSACTIONS WRITING PIPELINES
+// Flash feedback shown after an action (success / error messages)
+$flash_success = '';
+$flash_error   = '';
+
 // File Directory setup for Live Campaigns & Event Updates
 $upload_dir = 'uploads/events/';
 if (!is_dir($upload_dir)) {
@@ -103,69 +107,152 @@ if (isset($_GET['delete_event_id'])) {
 }
 
 if (isset($_POST['manual_entry'])) {
-    $name = $_POST['full_name']; $address = $_POST['address']; $phone = $_POST['phone_no'];
-    $shift = $_POST['shift']; $start_date = $_POST['starting_date'];
-    $months = intval($_POST['subscription_months']); $cost = floatval($_POST['package_cost']);
-    $paid = floatval($_POST['amount_paid']); $t_id = !empty($_POST['trainer_id']) ? $_POST['trainer_id'] : null;
+    $name = trim($_POST['full_name'] ?? ''); $address = trim($_POST['address'] ?? '');
+    $phone = trim($_POST['phone_no'] ?? ''); $shift = $_POST['shift'] ?? 'Morning';
+    $start_date = $_POST['starting_date'] ?? date('Y-m-d');
+    $months = max(1, (int)($_POST['subscription_months'] ?? 1));
+    $cost = max(0.0, (float)($_POST['package_cost'] ?? 0));
+    $paid = max(0.0, (float)($_POST['amount_paid'] ?? 0));
+    $t_id = !empty($_POST['trainer_id']) ? (int)$_POST['trainer_id'] : null;
+    $shift = ($shift === 'Evening') ? 'Evening' : 'Morning';
 
-    $stmt = $pdo->prepare("INSERT INTO members (full_name, address, phone_no, shift, starting_date, subscription_months, package_cost, amount_paid, trainer_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
-    $stmt->execute([$name, $address, $phone, $shift, $start_date, $months, $cost, $paid, $t_id]);
-    
-    if ($paid > 0) {
-        $m_id = $pdo->lastInsertId();
-        $log = $pdo->prepare("INSERT INTO payments (member_id, amount, payment_date) VALUES (?, ?, ?)");
-        $log->execute([$m_id, $paid, $start_date . ' ' . date('H:i:s')]);
+    if ($name === '' || $address === '' || $phone === '') {
+        $flash_error = 'Please fill in the member name, address and phone number.';
+    } elseif ($paid > $cost) {
+        $flash_error = 'Amount paid cannot exceed the package cost.';
+    } else {
+        try {
+            $stmt = $pdo->prepare("INSERT INTO members (full_name, address, phone_no, shift, starting_date, subscription_months, package_cost, amount_paid, trainer_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            $stmt->execute([$name, $address, $phone, $shift, $start_date, $months, $cost, $paid, $t_id]);
+
+            if ($paid > 0) {
+                $m_id = $pdo->lastInsertId();
+                $log = $pdo->prepare("INSERT INTO payments (member_id, amount, payment_date) VALUES (?, ?, ?)");
+                $log->execute([$m_id, $paid, $start_date . ' ' . date('H:i:s')]);
+            }
+            $due = $cost - $paid;
+            $flash_success = 'Registration Successful. ' . htmlspecialchars($name) . ' added to the registry. Remaining balance: Rs. ' . number_format($due, 2);
+        } catch (PDOException $e) {
+            $flash_error = 'Could not register the member. Please try again.';
+        }
     }
 }
 
 if (isset($_POST['add_staff'])) {
-    $t_name = $_POST['staff_name']; $role = $_POST['role']; $spec = $_POST['specialization'];
-    $ins = $pdo->prepare("INSERT INTO trainers (name, role, specialization) VALUES (?, ?, ?)");
-    $ins->execute([$t_name, $role, $spec]);
+    $t_name = trim($_POST['staff_name'] ?? ''); $role = $_POST['role'] ?? 'Trainer'; $spec = $_POST['specialization'] ?? '';
+    if ($t_name !== '') {
+        try {
+            $ins = $pdo->prepare("INSERT INTO trainers (name, role, specialization) VALUES (?, ?, ?)");
+            $ins->execute([$t_name, $role, $spec]);
+            $flash_success = 'Staff member added successfully.';
+        } catch (PDOException $e) {
+            $flash_error = 'Could not add that staff member.';
+        }
+    } else {
+        $flash_error = 'Please enter a staff member name.';
+    }
 }
 
 if (isset($_POST['update_payment'])) {
     $m_id = intval($_POST['member_id']); $new_pay = floatval($_POST['payment_increment']);
     $p_date = date('Y-m-d H:i:s');
-    
-    $stmt = $pdo->prepare("UPDATE members SET amount_paid = amount_paid + ? WHERE id = ?");
-    $stmt->execute([$new_pay, $m_id]);
-    
-    $log = $pdo->prepare("INSERT INTO payments (member_id, amount, payment_date) VALUES (?, ?, ?)");
-    $log->execute([$m_id, $new_pay, $p_date]);
+
+    if ($m_id <= 0 || $new_pay <= 0) {
+        $flash_error = 'Select a member and enter a positive payment amount.';
+    } else {
+        try {
+            $stmt = $pdo->prepare("UPDATE members SET amount_paid = amount_paid + ? WHERE id = ?");
+            $stmt->execute([$new_pay, $m_id]);
+
+            $log = $pdo->prepare("INSERT INTO payments (member_id, amount, payment_date) VALUES (?, ?, ?)");
+            $log->execute([$m_id, $new_pay, $p_date]);
+            $flash_success = 'Payment of Rs. ' . number_format($new_pay, 2) . ' posted successfully.';
+        } catch (PDOException $e) {
+            $flash_error = 'Could not post that payment. Please try again.';
+        }
+    }
 }
 
-// 3. REMOVALS & INTAKE STATE PROCESSING UPDATES
+// 3. TRANSACTIONAL APPROVAL  (bookings -> members move)
+// The members table is the single "Registry". Approving a booking
+// performs an atomic move: SELECT from bookings -> INSERT into
+// members -> DELETE from bookings. Done inside a transaction so the
+// row can never end up in both tables (or neither) on a failure.
+// Due amount is CALCULATED on the fly, never stored as a column.
 if (isset($_GET['approve_id'])) {
     $b_id = intval($_GET['approve_id']);
-    $booking = $pdo->prepare("SELECT * FROM bookings WHERE id = ?");
-    $booking->execute([$b_id]); $b_data = $booking->fetch();
-    if ($b_data) {
-        $pricingTier = [1=>1500, 2=>2800, 3=>3900, 4=>5000, 5=>6000, 6=>6600, 7=>7350, 8=>8000, 9=>8550, 10=>9000, 11=>9350, 12=>9350];
-        $months = 1; 
-        if(preg_match('/\d+/', $b_data['package_tier'], $matches)) { $months = intval($matches[0]); }
-        $cost = isset($pricingTier[$months]) ? $pricingTier[$months] : 1500;
-        
-        $ins = $pdo->prepare("INSERT INTO members (full_name, address, phone_no, shift, starting_date, subscription_months, package_cost, amount_paid, trainer_id) VALUES (?, ?, ?, ?, ?, ?, ?, 0.00, ?)");
-        $ins->execute([$b_data['client_name'], $b_data['address'], $b_data['phone_no'], $b_data['shift'], date('Y-m-d'), $months, $cost, $b_data['trainer_id']]);
-        
-        $del = $pdo->prepare("DELETE FROM bookings WHERE id = ?");
-        $del->execute([$b_id]);
+    try {
+        $pdo->beginTransaction();
+
+        // (1) Select the pending application (row-locked for the move)
+        $stmt = $pdo->prepare("SELECT * FROM bookings WHERE id = ? AND status = 'Pending' FOR UPDATE");
+        $stmt->execute([$b_id]);
+        $b_data = $stmt->fetch();
+
+        if (!$b_data) {
+            $pdo->rollBack();
+            $flash_error = 'That application could not be found or is no longer pending.';
+        } else {
+            // (2) Insert into members - column-to-column copy (schemas mirror)
+            $ins = $pdo->prepare(
+                "INSERT INTO members
+                    (full_name, address, phone_no, shift, starting_date, subscription_months, package_cost, amount_paid, trainer_id)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            );
+            $ins->execute([
+                $b_data['full_name'], $b_data['address'], $b_data['phone_no'], $b_data['shift'],
+                $b_data['starting_date'], $b_data['subscription_months'], $b_data['package_cost'],
+                $b_data['amount_paid'], $b_data['trainer_id']
+            ]);
+
+            // Carry over any upfront deposit the applicant paid at join time
+            if (floatval($b_data['amount_paid']) > 0) {
+                $m_id = $pdo->lastInsertId();
+                $log = $pdo->prepare("INSERT INTO payments (member_id, amount, payment_date) VALUES (?, ?, ?)");
+                $log->execute([$m_id, $b_data['amount_paid'], $b_data['starting_date'] . ' ' . date('H:i:s')]);
+            }
+
+            // (3) Delete from bookings so it leaves the pending list
+            $del = $pdo->prepare("DELETE FROM bookings WHERE id = ?");
+            $del->execute([$b_id]);
+
+            $pdo->commit();
+
+            // (4) Due calculated on the fly (package_cost - amount_paid)
+            $due_amount = floatval($b_data['package_cost']) - floatval($b_data['amount_paid']);
+            $flash_success = 'Admin Approval Processed. ' . htmlspecialchars($b_data['full_name'])
+                . ' moved to the registry. Remaining balance: Rs. ' . number_format($due_amount, 2);
+        }
+    } catch (PDOException $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        $flash_error = 'Approval failed and was rolled back. Please try again.';
     }
 }
 
 if (isset($_GET['delete_booking_id'])) {
     $del_id = intval($_GET['delete_booking_id']);
-    $del = $pdo->prepare("DELETE FROM bookings WHERE id = ?");
-    $del->execute([$del_id]);
+    try {
+        $del = $pdo->prepare("DELETE FROM bookings WHERE id = ?");
+        $del->execute([$del_id]);
+        $flash_success = 'Application request rejected and removed.';
+    } catch (PDOException $e) {
+        $flash_error = 'Could not remove that application.';
+    }
 }
 
 if (isset($_GET['delete_member_id'])) {
     $m_del_id = intval($_GET['delete_member_id']);
-    $del_p = $pdo->prepare("DELETE FROM payments WHERE member_id = ?");
-    $del_p->execute([$m_del_id]);
-    $del_m = $pdo->prepare("DELETE FROM members WHERE id = ?");
-    $del_m->execute([$m_del_id]);
+    try {
+        $del_p = $pdo->prepare("DELETE FROM payments WHERE member_id = ?");
+        $del_p->execute([$m_del_id]);
+        $del_m = $pdo->prepare("DELETE FROM members WHERE id = ?");
+        $del_m->execute([$m_del_id]);
+        $flash_success = 'Member profile deleted from the registry.';
+    } catch (PDOException $e) {
+        $flash_error = 'Could not delete that member profile.';
+    }
 }
 
 // 4. RETRIEVE RE-RENDER ENGINE AGGREGATES
@@ -223,11 +310,6 @@ $total_members = count($members);
         }
     </style>
     <script>
-        const pricing = { 1:1500, 2:2800, 3:3900, 4:5000, 5:6000, 6:6600, 7:7350, 8:8000, 9:8550, 10:9000, 11:9350, 12:9450 };
-        function autoCost() {
-            const m = document.getElementById('sub_m').value;
-            document.getElementById('p_cost').value = pricing[m] || 1500;
-        }
         function switchTab(tabId) {
             document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
             document.querySelectorAll('.nav-bar button').forEach(el => el.classList.remove('active'));
@@ -254,7 +336,7 @@ $total_members = count($members);
             document.getElementById('printBox').style.display = 'none';
         }
         function confirmDeleteBooking(bookingId) {
-            if(confirm("Are you sure you want to delete this applicant request?")) {
+            if(confirm("Are you sure you want to reject and remove this application?")) {
                 submitActionWithCreds("admin.php?delete_booking_id=" + bookingId + "&tab=applicants");
             }
         }
@@ -320,20 +402,30 @@ $total_members = count($members);
 
 <div class="container" style="padding:12px; box-sizing:border-box;">
 
+       <?php if ($flash_success !== ''): ?>
+           <div class="alert success" style="margin-bottom:12px;"><?= htmlspecialchars($flash_success) ?></div>
+       <?php endif; ?>
+       <?php if ($flash_error !== ''): ?>
+           <div class="alert error" style="margin-bottom:12px;"><?= htmlspecialchars($flash_error) ?></div>
+       <?php endif; ?>
+
        <div id="applicants" class="tab-content">
         <h4 style="color:#fff; margin-bottom:10px; font-size:0.95rem;">Pending Public Applications</h4>
-        <?php foreach($bookings as $b): ?>
+        <?php foreach($bookings as $b):
+            $b_due = floatval($b['package_cost']) - floatval($b['amount_paid']);
+        ?>
             <div class="mini-card" style="border-left:3px solid var(--accent);">
-                <div class="data-line"><strong><?= htmlspecialchars($b['client_name']) ?></strong> <span class="badge badge-pending"><?= htmlspecialchars($b['shift']) ?></span></div>
+                <div class="data-line"><strong><?= htmlspecialchars($b['full_name']) ?></strong> <span class="badge badge-pending"><?= htmlspecialchars($b['shift']) ?></span></div>
                 <div class="data-line" style="color:#a0aec0;">📞 <?= htmlspecialchars($b['phone_no']) ?> | 📍 <?= htmlspecialchars($b['address']) ?></div>
-                <div class="data-line" style="color:#cbd5e0;">Term Preference: <?= htmlspecialchars($b['package_tier']) ?></div>
+                <div class="data-line" style="color:#cbd5e0;">Term: <?= (int)$b['subscription_months'] ?> Month<?= ((int)$b['subscription_months'] > 1) ? 's' : '' ?> | Start: <?= htmlspecialchars($b['starting_date']) ?></div>
+                <div class="data-line" style="color:#cbd5e0;">Cost: Rs.<?= number_format($b['package_cost'], 2) ?> | Paid: Rs.<?= number_format($b['amount_paid'], 2) ?> | <span style="color:<?= $b_due > 0 ? '#e74c3c' : '#2ecc71' ?>; font-weight:bold;">Due: Rs.<?= number_format($b_due, 2) ?></span></div>
                 
                 <div style="margin-top:10px; display:flex; width:100%; gap:8px;">
-                    <button onclick="confirmDeleteBooking(<?= $b['id'] ?>)" class="btn" style="width:50%; padding:6px 0; font-size:0.8rem; background:#e74c3c; border-radius:4px; font-weight:bold; cursor:pointer;">Delete Request</button>
+                    <button onclick="confirmDeleteBooking(<?= $b['id'] ?>)" class="btn" style="width:50%; padding:6px 0; font-size:0.8rem; background:#e74c3c; border-radius:4px; font-weight:bold; cursor:pointer;">Reject</button>
                     <form action="admin.php?approve_id=<?= $b['id'] ?>&tab=applicants" method="POST" style="width:50%; margin:0; padding:0;">
                         <input type="hidden" name="username" value="<?= htmlspecialchars($username) ?>">
                         <input type="hidden" name="password" value="<?= htmlspecialchars($password) ?>">
-                        <button type="submit" class="btn" style="width:100%; padding:6px 0; font-size:0.8rem; border-radius:4px; font-weight:bold; cursor:pointer;">Approve Profile</button>
+                        <button type="submit" class="btn" style="width:100%; padding:6px 0; font-size:0.8rem; border-radius:4px; font-weight:bold; cursor:pointer;">Approve</button>
                     </form>
                 </div>
             </div>
@@ -384,36 +476,18 @@ $total_members = count($members);
 
     <!-- TAB 2: REGISTER SYSTEM (JOIN WORKSPACE) -->
     <div id="register" class="tab-content">
-        <div class="mini-card" style="padding:10px 14px;">
-            <h4 style="color:var(--accent); margin:0 0 10px 0; font-size:0.95rem;">Direct Enrollment Onboarding</h4>
-            <form action="admin.php?tab=register" method="POST" class="form-compact">
-                <input type="hidden" name="username" value="<?= htmlspecialchars($username) ?>">
-                <input type="hidden" name="password" value="<?= htmlspecialchars($password) ?>">
-                <div class="form-group"><label>Full Name</label><input type="text" name="full_name" required></div>
-                <div class="form-group"><label>Address</label><input type="text" name="address" required></div>
-                <div class="form-group"><label>Phone Axis</label><input type="text" name="phone_no" required></div>
-                
-                <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
-                    <div class="form-group"><label>Plan Duration</label>
-                        <select id="sub_m" name="subscription_months" onchange="autoCost()">
-                            <?php for($i=1;$i<=12;$i++): ?><option value="<?=$i?>"><?=$i?> Month<?=$i>1?'s':''?></option><?php endfor; ?>
-                        </select>
-                    </div>
-                    <div class="form-group"><label>Assigned Coach</label>
-                        <select name="trainer_id"><option value="">Self Guided</option><?php foreach($trainers as $t): ?><option value="<?=$t['id']?>"><?=$t['name']?></option><?php endforeach; ?></select>
-                    </div>
-                </div>
-
-                <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
-                    <div class="form-group"><label>Package Cost</label><input type="number" id="p_cost" name="package_cost" value="1500"></div>
-                    <div class="form-group"><label>Amount Paid Now</label><input type="number" name="amount_paid" value="0"></div>
-                </div>
-                <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
-                    <div class="form-group"><label>Shift</label><select name="shift"><option>Morning</option><option>Evening</option></select></div>
-                    <div class="form-group"><label>Starting Date</label><input type="date" name="starting_date" value="<?=date('Y-m-d')?>" required></div>
-                </div>
-                <button type="submit" name="manual_entry" class="btn" style="width:100%; padding:8px; margin-top:6px; font-weight:bold;">Register Member</button>
-            </form>
+        <div class="mini-card" style="padding:14px;">
+            <h4 style="color:var(--accent); margin:0 0 10px 0; font-size:0.95rem;">Direct Member Enrollment</h4>
+            <p style="color:var(--text-muted); font-size:0.8rem; margin:0 0 12px 0;">Manually register a member directly into the registry. This form is identical to the public "Join" page.</p>
+            <?php
+            $form_action       = 'admin.php?tab=register';
+            $form_submit_name  = 'manual_entry';
+            $form_submit_label = 'Register Member';
+            $form_prefix       = 'adm';
+            $form_hidden_html  = '<input type="hidden" name="username" value="' . htmlspecialchars($username) . '">'
+                                . '<input type="hidden" name="password" value="' . htmlspecialchars($password) . '">';
+            include 'member_form.php';
+            ?>
         </div>
     </div>
 
@@ -494,7 +568,49 @@ $total_members = count($members);
 
     <!-- TAB 5: GYM REGISTRY REPORTS -->
     <div id="registry" class="tab-content">
-        
+
+        <!-- Compact overview TABLE (overflow-x:auto keeps layout intact on mobile) -->
+        <h4 style="color:var(--accent); margin:0 0 8px 0; font-size:0.95rem; border-bottom:1px solid var(--border); padding-bottom:4px; text-transform:uppercase; letter-spacing:0.5px;">
+            📋 Full Member Registry
+        </h4>
+        <?php if (count($members) > 0): ?>
+        <div class="table-wrap" style="margin-bottom:18px;">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>ID</th><th>Name</th><th>Phone</th><th>Shift</th>
+                        <th>Start</th><th>Months</th><th class="num">Cost</th>
+                        <th class="num">Paid</th><th class="num">Due</th><th>Trainer</th><th>Action</th>
+                    </tr>
+                </thead>
+                <tbody>
+                <?php foreach ($members as $m):
+                    $due = floatval($m['package_cost']) - floatval($m['amount_paid']);
+                ?>
+                    <tr>
+                        <td>MW-<?= (int)$m['id'] ?></td>
+                        <td><?= htmlspecialchars($m['full_name']) ?></td>
+                        <td><?= htmlspecialchars($m['phone_no']) ?></td>
+                        <td><span class="badge badge-pending"><?= htmlspecialchars($m['shift']) ?></span></td>
+                        <td><?= htmlspecialchars($m['starting_date']) ?></td>
+                        <td><?= (int)$m['subscription_months'] ?></td>
+                        <td class="num">Rs.<?= number_format($m['package_cost'], 2) ?></td>
+                        <td class="num">Rs.<?= number_format($m['amount_paid'], 2) ?></td>
+                        <td class="num <?= $due > 0 ? 'due-pos' : 'due-zero' ?>">Rs.<?= number_format($due, 2) ?></td>
+                        <td><?= htmlspecialchars($m['trainer_name'] ?? '—') ?></td>
+                        <td>
+                            <button class="btn" style="padding:3px 8px; font-size:0.7rem; background:#e74c3c; border-radius:4px;" onclick="confirmDeleteMember(<?= (int)$m['id'] ?>)">Delete</button>
+                        </td>
+                    </tr>
+                <?php endforeach; ?>
+                </tbody>
+            </table>
+        </div>
+        <?php else: ?>
+            <p style="color:var(--text-muted); text-align:center; margin-bottom:18px;">No members in the registry yet.</p>
+        <?php endif; ?>
+
+        <!-- Detailed per-shift cards with print receipts -->
         <?php 
         $shifts = ['Morning', 'Evening'];
         foreach($shifts as $current_shift): 

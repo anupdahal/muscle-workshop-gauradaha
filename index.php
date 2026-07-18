@@ -1,33 +1,50 @@
 <?php
 include 'db.php';
 
-// Post Intake Booking Request
-if($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['submit_booking'])) {
-    $name = $_POST['c_name']; $phone = $_POST['c_phone']; $addr = $_POST['c_addr'];
-    $shift = $_POST['c_shift']; $tier = $_POST['c_tier'];
-    
-    $stmt = $pdo->prepare("INSERT INTO bookings (client_name, phone_no, address, shift, package_tier) VALUES (?, ?, ?, ?, ?)");
-    $stmt->execute([$name, $phone, $addr, $shift, $tier]);
-    $success = "Registration Application Lodged Successfully!";
+$success = '';
+$error = '';
+
+// Post Intake Booking Request (unified field set -> mirrors members table)
+if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['submit_booking'])) {
+    $full_name = trim($_POST['full_name'] ?? '');
+    $address   = trim($_POST['address'] ?? '');
+    $phone_no  = trim($_POST['phone_no'] ?? '');
+    $shift     = ($_POST['shift'] ?? 'Morning') === 'Evening' ? 'Evening' : 'Morning';
+    $starting_date         = $_POST['starting_date'] ?? date('Y-m-d');
+    $subscription_months   = max(1, (int)($_POST['subscription_months'] ?? 1));
+    $package_cost          = max(0.0, (float)($_POST['package_cost'] ?? 0));
+    $amount_paid           = max(0.0, (float)($_POST['amount_paid'] ?? 0));
+    $trainer_id            = !empty($_POST['trainer_id']) ? (int)$_POST['trainer_id'] : null;
+
+    if ($full_name === '' || $address === '' || $phone_no === '') {
+        $error = 'Please fill in your name, address and phone number.';
+    } elseif ($amount_paid > $package_cost) {
+        $error = 'Amount paid cannot be greater than the package cost.';
+    } else {
+        try {
+            $stmt = $pdo->prepare(
+                "INSERT INTO bookings
+                    (full_name, address, phone_no, shift, starting_date, subscription_months, package_cost, amount_paid, trainer_id)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            );
+            $stmt->execute([$full_name, $address, $phone_no, $shift, $starting_date, $subscription_months, $package_cost, $amount_paid, $trainer_id]);
+            $due = $package_cost - $amount_paid;
+            $success = "Registration Successful! Your application is pending admin approval. Remaining balance: Rs. " . number_format($due, 2);
+        } catch (PDOException $e) {
+            $error = 'We could not submit your application. Please try again later.';
+        }
+    }
 }
 
 // Fetch dynamic gym events for notices and marquee sections
 try {
-    $pdo->exec("CREATE TABLE IF NOT EXISTS gym_events (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        title VARCHAR(255) NOT NULL,
-        description TEXT NOT NULL,
-        image_path VARCHAR(255) NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
-    
     $stmt_events = $pdo->query("SELECT * FROM gym_events ORDER BY created_at DESC");
     $live_events = $stmt_events->fetchAll();
 } catch (Exception $e) {
     $live_events = [];
 }
 
-// Analytics Metrics Parsing
+// Analytics Metrics Parsing (prepared where user input could matter; counts are safe)
 $m_count = $pdo->query("SELECT COUNT(*) FROM members WHERE shift='Morning'")->fetchColumn();
 $e_count = $pdo->query("SELECT COUNT(*) FROM members WHERE shift='Evening'")->fetchColumn();
 $total_members = $pdo->query("SELECT COUNT(*) FROM members")->fetchColumn();
@@ -75,7 +92,7 @@ $trainers = $pdo->query("SELECT * FROM trainers ORDER BY id DESC")->fetchAll();
         }
     </script>
 </head>
-<body onload="switchTab('dashboard')">
+<body onload="switchTab((location.hash || '').replace('#','') || 'dashboard')">
 
 <div style="background:var(--p-bg); border-bottom:1px solid var(--border); padding:12px 15px; display:flex; justify-content:space-between; align-items:center; position:relative; box-sizing:border-box;">
     <div style="display:flex; align-items:center; gap:8px;">
@@ -150,20 +167,17 @@ $moving_ticker_html = ob_get_clean();
         <?= $moving_ticker_html ?>
 
         <div class="mini-card">
-            <h4 style="color:var(--accent); margin-top:0; font-size:0.95rem;">Submit Join Request</h4>
-            <?php if(isset($success)): ?><p style="color:#2ecc71; font-weight:bold; font-size:0.85rem;"><?= $success ?></p><?php endif; ?>
-            <form action="index.php" method="POST">
-                <div class="form-group"><label>Your Full Name</label><input type="text" name="c_name" required></div>
-                <div class="form-group"><label>Phone Number</label><input type="text" name="c_phone" required></div>
-                <div class="form-group"><label>Home Address</label><input type="text" name="c_addr" required></div>
-                <div class="form-group"><label>Preferred Shift</label><select name="c_shift"><option>Morning</option><option>Evening</option></select></div>
-                <div class="form-group"><label>Target Subscription Tier</label>
-                    <select name="c_tier">
-                        <?php for($i=1;$i<=12;$i++): ?><option value="<?=$i?> Month Plan"><?=$i?> Month Plan</option><?php endfor; ?>
-                    </select>
-                </div>
-                <button type="submit" name="submit_booking" class="btn" style="width:100%; padding:8px;">Submit Intake Request</button>
-            </form>
+            <h4 style="color:var(--accent); margin-top:0; font-size:0.95rem;">Join Muscle Workshop</h4>
+            <p style="color:var(--text-muted); font-size:0.8rem; margin:0 0 12px 0;">Fill in your details below. An admin will review and approve your membership.</p>
+            <?php if ($success !== ''): ?><div class="alert success"><?= htmlspecialchars($success) ?></div><?php endif; ?>
+            <?php if ($error !== ''): ?><div class="alert error"><?= htmlspecialchars($error) ?></div><?php endif; ?>
+            <?php
+            $form_action       = 'index.php#register';
+            $form_submit_name  = 'submit_booking';
+            $form_submit_label = 'Submit Registration';
+            $form_prefix       = 'pub';
+            include 'member_form.php';
+            ?>
         </div>
     </div>
 
