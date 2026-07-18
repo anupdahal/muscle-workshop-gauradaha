@@ -1,5 +1,4 @@
 # muscle-workshop-gauradaha
-https://muscleworkshop.ct.ws/
 ANP-01: A Smarter Way to Manage Your Operations
 Welcome to the era of ANP-01. This update represents a significant leap forward in how we handle data, administrative tasks, and daily operations. At its heart, ANP-01 is about removing the friction from your workday. Whether you are managing member registrations or tracking financial records, the goal is simple: make the system faster, smarter, and error-free.
 
