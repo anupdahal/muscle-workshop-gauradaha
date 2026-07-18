@@ -265,3 +265,100 @@ td {
     font-weight: 600;
 }
 .alert.success { background: rgba(0, 255, 136, 0.1); border: 1px solid var(--accent); color: var(--accent); }
+.alert.error   { background: rgba(231, 76, 60, 0.12); border: 1px solid #e74c3c; color: #ff6b6b; }
+.alert.info    { background: rgba(52, 152, 219, 0.12); border: 1px solid #3498db; color: #5dade2; }
+
+/* ============================================================
+   UNIFIED MEMBER FORM  (shared by public Join + Admin entry)
+   Mobile-first: single vertical stack, large touch targets.
+   ============================================================ */
+.member-form .mf-grid {
+    display: grid;
+    grid-template-columns: 1fr;          /* vertical stack on mobile */
+    gap: 0.9rem;
+}
+.member-form .form-group { margin-bottom: 0; }
+.member-form .mf-full { grid-column: 1 / -1; }
+.member-form label {
+    font-size: 0.78rem;
+    margin-bottom: 0.35rem;
+    letter-spacing: 0.4px;
+}
+/* Large inputs for comfortable mobile touch (>=44px target) */
+.member-form input,
+.member-form select,
+.member-form textarea {
+    width: 100%;
+    padding: 0.9rem 1rem;
+    min-height: 48px;
+    background: #090d12;
+    border: 1px solid var(--border);
+    color: #fff;
+    border-radius: 8px;
+    font-size: 1rem;
+    box-sizing: border-box;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+.member-form input:focus,
+.member-form select:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-glow);
+}
+.member-form .mf-submit {
+    width: 100%;
+    margin-top: 0.4rem;
+    padding: 0.95rem;
+    font-size: 0.95rem;
+    min-height: 50px;
+}
+/* Two-column layout kicks in on tablets/desktops */
+@media (min-width: 640px) {
+    .member-form .mf-grid {
+        grid-template-columns: 1fr 1fr;
+    }
+}
+
+/* ============================================================
+   ADMIN DATA TABLE  (overflow-x:auto prevents layout breaking)
+   ============================================================ */
+.table-wrap {
+    width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg-card);
+}
+.data-table {
+    width: 100%;
+    border-collapse: collapse;
+    white-space: nowrap;
+    font-size: 0.85rem;
+}
+.data-table thead th {
+    position: sticky;
+    top: 0;
+    background: #0d1422;
+    color: var(--accent);
+    text-transform: uppercase;
+    font-size: 0.72rem;
+    letter-spacing: 0.5px;
+    padding: 0.8rem 1rem;
+    border-bottom: 1px solid var(--border);
+    text-align: left;
+    z-index: 1;
+}
+.data-table tbody td {
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid var(--border);
+    color: #e2e8f0;
+}
+.data-table tbody tr:hover { background: #111a2b; }
+.data-table tbody tr:last-child td { border-bottom: none; }
+.data-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+.data-table .due-pos { color: #ff6b6b; font-weight: 700; }
+.data-table .due-zero { color: var(--accent); font-weight: 700; }
+@media (min-width: 900px) {
+    .data-table { font-size: 0.9rem; white-space: normal; }
+}
